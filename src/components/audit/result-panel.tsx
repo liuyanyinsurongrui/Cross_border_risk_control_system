@@ -172,6 +172,17 @@ export function ResultPanel({ result }: ResultPanelProps) {
           <ConclusionIcon className={`h-6 w-6 ${current.color}`} />
           <div>
             <p className={`text-lg font-semibold ${current.color}`}>{result.conclusion}</p>
+            {result.adultConclusion && (
+              <p className="mt-0.5 text-xs text-slate-300">成人审核结论：{result.adultConclusion}</p>
+            )}
+            {result.screeningLabel && (
+              <p className="mt-0.5 text-xs text-amber-300">商品名初筛：{result.screeningLabel}</p>
+            )}
+            {result.matchedRuleNames && result.matchedRuleNames.length > 0 && (
+              <p className="mt-0.5 text-xs text-cyan-300">
+                命中规则：{result.matchedRuleNames.join('、')}
+              </p>
+            )}
             <p className="text-xs text-slate-400">
               {result.conclusion === '未审核'
                 ? '当前未启用审核规则，暂未调用模型判断'

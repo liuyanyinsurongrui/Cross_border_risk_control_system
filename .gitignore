@@ -115,6 +115,9 @@ pids
 *.pid
 *.seed
 *.pid.lock
+.batch-jobs/
+.runtime-store/
+.codex-runtime/
 # Diagnostic reports
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 # Cache

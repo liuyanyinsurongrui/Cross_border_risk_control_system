@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Loader2, Play, SendHorizontal, Shield } from 'lucide-react';
+import { Loader2, Play, SendHorizontal, Shield, TerminalSquare, Globe } from 'lucide-react';
+import { BatchModePanel } from '@/components/audit/batch-mode-panel';
 import { ContentPreview } from '@/components/audit/content-preview';
 import { FeishuConfigDialog } from '@/components/audit/feishu-config-dialog';
 import { LinkList } from '@/components/audit/link-list';
@@ -12,7 +13,9 @@ import { StatsBar } from '@/components/audit/stats-bar';
 import { UploadZone } from '@/components/audit/upload-zone';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
+import { buildAdultFetchFallback, getAdultConclusionStatus } from '@/lib/adult-audit';
 import type {
+  AuditMode,
   AuditResult,
   AuditRules,
   FeishuConfig,
@@ -21,6 +24,8 @@ import type {
   ProductLink,
   ScrapedContent,
 } from '@/lib/types';
+
+const RULES_STORAGE_KEY = 'audit_rules_config';
 
 function createLimiter(concurrency: number) {
   const safeConcurrency = Math.max(1, concurrency);
@@ -70,6 +75,7 @@ function getFetchErrorMessage(statusCode?: number, fallback?: string) {
 
 export default function AuditPage() {
   const { toast } = useToast();
+  const [mode, setMode] = useState<AuditMode>('web');
   const [results, setResults] = useState<AuditResult[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -80,6 +86,38 @@ export default function AuditPage() {
   const [rules, setRules] = useState<AuditRules>({
     rules: DEFAULT_AUDIT_RULES.map((rule) => ({ ...rule })),
   });
+  const [rulesHydrated, setRulesHydrated] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(RULES_STORAGE_KEY);
+      if (!saved) {
+        setRulesHydrated(true);
+        return;
+      }
+
+      const parsed = JSON.parse(saved) as AuditRules;
+      if (Array.isArray(parsed?.rules) && parsed.rules.length > 0) {
+        setRules({
+          rules: parsed.rules.map((rule) => ({ ...rule })),
+        });
+      }
+    } catch {
+      // ignore invalid saved rules
+    } finally {
+      setRulesHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!rulesHydrated) return;
+
+    try {
+      localStorage.setItem(RULES_STORAGE_KEY, JSON.stringify(rules));
+    } catch {
+      // ignore
+    }
+  }, [rules, rulesHydrated]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -242,18 +280,37 @@ export default function AuditPage() {
           error?: string;
           content?: ScrapedContent;
           statusCode?: number;
+          pageState?: string;
         }>(response);
 
         if (!response.ok || data.error || !data.content) {
+          const fallback = buildAdultFetchFallback(data.statusCode, data.error);
           updateResult(result.id, {
-            status: 'error',
+            status: getAdultConclusionStatus(fallback.conclusion),
+            conclusion:
+              fallback.conclusion === '淫秽产品违规'
+                ? '违规'
+                : fallback.conclusion === '产品通过'
+                  ? '合规'
+                  : fallback.conclusion === '无需处理'
+                    ? '未审核'
+                    : '待人工复核',
+            adultConclusion: fallback.conclusion,
+            analysis: fallback.analysis,
+            auditDetail: fallback.analysis,
             errorMessage: getFetchErrorMessage(data.statusCode, data.error),
+            scrapedContent: data.content,
           });
           return null;
         }
 
-        updateResult(result.id, { status: 'fetched', scrapedContent: data.content });
-        return data.content;
+        const enrichedContent = {
+          ...data.content,
+          productName: result.productLink.name || data.content.title,
+        };
+
+        updateResult(result.id, { status: 'fetched', scrapedContent: enrichedContent });
+        return enrichedContent;
       } catch (error) {
         updateResult(result.id, {
           status: 'error',
@@ -280,6 +337,9 @@ export default function AuditPage() {
           error?: string;
           rawResponse?: string;
           ruleResults?: AuditResult['ruleResults'];
+          screeningLabel?: string;
+          adultConclusion?: string;
+          matchedRuleNames?: string[];
           result?: {
             conclusion?: string;
             violations?: AuditResult['violations'];
@@ -312,6 +372,9 @@ export default function AuditPage() {
         updateResult(result.id, {
           status,
           conclusion,
+          adultConclusion: data.adultConclusion,
+          screeningLabel: data.screeningLabel,
+          matchedRuleNames: data.matchedRuleNames,
           violations: data.result.violations || [],
           analysis: data.result.analysis || '',
           auditDetail: data.result.analysis || data.rawResponse || '',
@@ -514,64 +577,102 @@ export default function AuditPage() {
 
       <div className="border-b border-slate-800/50 bg-[#12141c]">
         <div className="mx-auto flex max-w-[1440px] items-center justify-between px-6 py-3">
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
             <Button
-              onClick={handleBatchAudit}
-              disabled={!hasResults || isAuditing || isProcessing}
-              className="gap-2 bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+              variant={mode === 'web' ? 'default' : 'outline'}
               size="sm"
+              onClick={() => setMode('web')}
+              className={mode === 'web' ? 'bg-emerald-600 hover:bg-emerald-700' : 'border-slate-600 text-slate-300'}
             >
-              {isAuditing || isProcessing ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Play className="h-3.5 w-3.5" />
-              )}
-              {isAuditing || isProcessing ? '处理中...' : '开始审核'}
+              <Globe className="mr-1.5 h-3.5 w-3.5" />
+              网页审核
             </Button>
-
             <Button
-              onClick={handlePushFeishu}
-              disabled={!hasCompleted || isPushing}
-              variant="outline"
+              variant={mode === 'cmd' ? 'default' : 'outline'}
               size="sm"
-              className="gap-2 border-slate-600 text-slate-300 hover:bg-slate-800"
+              onClick={() => setMode('cmd')}
+              className={mode === 'cmd' ? 'bg-cyan-600 hover:bg-cyan-700' : 'border-slate-600 text-slate-300'}
             >
-              {isPushing ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <SendHorizontal className="h-3.5 w-3.5" />
-              )}
-              推送飞书
+              <TerminalSquare className="mr-1.5 h-3.5 w-3.5" />
+              CMD 后台批量审核
             </Button>
           </div>
+
+          {mode === 'web' && (
+            <div className="flex gap-2">
+              <Button
+                onClick={handleBatchAudit}
+                disabled={!hasResults || isAuditing || isProcessing}
+                className="gap-2 bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                size="sm"
+              >
+                {isAuditing || isProcessing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Play className="h-3.5 w-3.5" />
+                )}
+                {isAuditing || isProcessing ? '处理中...' : '开始审核'}
+              </Button>
+
+              <Button
+                onClick={handlePushFeishu}
+                disabled={!hasCompleted || isPushing}
+                variant="outline"
+                size="sm"
+                className="gap-2 border-slate-600 text-slate-300 hover:bg-slate-800"
+              >
+                {isPushing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <SendHorizontal className="h-3.5 w-3.5" />
+                )}
+                推送飞书
+              </Button>
+            </div>
+          )}
         </div>
       </div>
 
       <main className="mx-auto max-w-[1440px] px-6 py-6">
-        <div className="grid grid-cols-12 gap-5">
-          <div className="col-span-4 space-y-4">
-            <UploadZone
-              onLinksAdded={handleLinksAdded}
-              isLoading={isUploading}
-              setIsLoading={setIsUploading}
-            />
-            <LinkList results={results} selectedIndex={selectedIndex} onSelect={setSelectedIndex} />
-            <RulesConfig rules={rules} modelOptions={modelOptions} onChange={setRules} />
+        {mode === 'cmd' ? (
+          <div className="grid grid-cols-12 gap-5">
+            <div className="col-span-6">
+              <BatchModePanel
+                modelConfig={modelConfig}
+                feishuConfig={feishuConfig}
+                rules={rules}
+              />
+            </div>
+            <div className="col-span-6">
+              <RulesConfig rules={rules} modelOptions={modelOptions} onChange={setRules} />
+            </div>
           </div>
+        ) : (
+          <div className="grid grid-cols-12 gap-5">
+            <div className="col-span-4 space-y-4">
+              <UploadZone
+                onLinksAdded={handleLinksAdded}
+                isLoading={isUploading}
+                setIsLoading={setIsUploading}
+              />
+              <LinkList results={results} selectedIndex={selectedIndex} onSelect={setSelectedIndex} />
+              <RulesConfig rules={rules} modelOptions={modelOptions} onChange={setRules} />
+            </div>
 
-          <div className="col-span-4">
-            <ContentPreview
-              content={selectedResult?.scrapedContent}
-              isLoading={
-                selectedResult?.status === 'scraping' || selectedResult?.status === 'auditing'
-              }
-            />
-          </div>
+            <div className="col-span-4">
+              <ContentPreview
+                content={selectedResult?.scrapedContent}
+                isLoading={
+                  selectedResult?.status === 'scraping' || selectedResult?.status === 'auditing'
+                }
+              />
+            </div>
 
-          <div className="col-span-4">
-            <ResultPanel result={selectedResult} />
+            <div className="col-span-4">
+              <ResultPanel result={selectedResult} />
+            </div>
           </div>
-        </div>
+        )}
       </main>
     </div>
   );

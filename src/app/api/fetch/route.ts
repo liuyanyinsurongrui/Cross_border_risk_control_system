@@ -1,6 +1,7 @@
 ﻿import { NextRequest, NextResponse } from 'next/server';
 import * as cheerio from 'cheerio';
 import type { ScrapedContent, ScrapedImage } from '@/lib/types';
+import { isAccessDeniedText } from '@/lib/adult-audit';
 
 const FETCH_TIMEOUT_MS = 10000;
 const MAX_TEXT_CONTENT_LENGTH = 5000;
@@ -20,6 +21,7 @@ interface ScrapePageResult {
   content?: ScrapedContent;
   statusCode: number;
   error?: string;
+  pageState?: 'ok' | 'http-error' | 'access-denied' | 'empty' | 'insufficient-content';
 }
 
 /**
@@ -195,11 +197,51 @@ function collectImageCandidates(
   return [...attrCandidates, ...backgroundCandidates, ...pictureCandidates];
 }
 
+function isLikelyUtilityContainer(
+  $: cheerio.CheerioAPI,
+  element: unknown
+): boolean {
+  const $el = $(element as never);
+  const context = [
+    $el.attr('class'),
+    $el.attr('id'),
+    $el.parent().attr('class'),
+    $el.parent().attr('id'),
+    $el.closest('header, footer, nav, aside, dialog').attr('class'),
+    $el.closest('header, footer, nav, aside, dialog').attr('id'),
+  ]
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .join(' ')
+    .toLowerCase();
+
+  const utilityKeywords = [
+    'popup',
+    'notification',
+    'widget',
+    'toast',
+    'sales-pop',
+    'modal',
+    'header',
+    'navbar',
+    'nav-',
+    'footer',
+    'copyright',
+    'newsletter',
+    'subscribe',
+    'sticky',
+    'floating',
+    'drawer',
+  ];
+
+  return utilityKeywords.some((keyword) => context.includes(keyword));
+}
+
 function isDecorativeImageElement(
   $: cheerio.CheerioAPI,
   element: unknown,
   imageUrl: string
 ): boolean {
+  if (isLikelyUtilityContainer($, element)) return true;
   const $el = $(element as never);
   const container = $el.closest('section, article, div, aside, footer, li');
   const context = [
@@ -454,6 +496,52 @@ function extractJsonStringValues(
   return results;
 }
 
+function extractScriptComponentImageUrls(
+  html: string,
+  baseUrl: string,
+  maxImages: number,
+  excludeKeys: Set<string>
+): string[] {
+  if (!html || maxImages <= 0) return [];
+
+  const results: string[] = [];
+  const seen = new Set(excludeKeys);
+  const entryPattern = /"key":"([^"]+)","target":"image","value":"((?:[^"\\]|\\.)*)"/gi;
+  const skipKeyKeywords = [
+    'avatar',
+    'comment',
+    'user',
+    'icon',
+    'logo',
+    'badge',
+    'payment',
+    'trust',
+    'secure',
+    'author',
+    'reviewer',
+  ];
+
+  let match: RegExpExecArray | null;
+  while ((match = entryPattern.exec(html)) !== null && results.length < maxImages) {
+    const key = match[1].toLowerCase();
+    if (skipKeyKeywords.some((keyword) => key.includes(keyword))) {
+      continue;
+    }
+
+    const rawUrl = match[2].replace(/\\\//g, '/').trim();
+    const normalized = normalizeImageUrl(rawUrl, baseUrl);
+    if (!normalized) continue;
+
+    const dedupKey = getImageDedupKey(normalized);
+    if (seen.has(dedupKey)) continue;
+
+    seen.add(dedupKey);
+    results.push(normalized);
+  }
+
+  return results;
+}
+
 // ============ 涓绘姄鍙栧嚱鏁?============
 
 function normalizeRequestUrl(rawUrl: string): string | null {
@@ -513,6 +601,7 @@ async function scrapePage(url: string): Promise<ScrapePageResult> {
       return {
         statusCode: page.statusCode,
         error: `网页状态异常：HTTP ${page.statusCode}`,
+        pageState: 'http-error',
       };
     }
 
@@ -945,11 +1034,26 @@ async function scrapePage(url: string): Promise<ScrapePageResult> {
       }
     });
 
+    // ---- 4.8 从脚本组件配置里补抓详情图（适配图片藏在 JSON schema 的页面） ----
+    if (!hasEnoughDetailImages()) {
+      const contextualDetailUrls = extractScriptComponentImageUrls(
+        html,
+        url,
+        MAX_DETAIL_IMAGES - detailImages.length,
+        new Set([...seenProductUrls, ...seenDetailUrls])
+      );
+
+      for (const imgUrl of contextualDetailUrls) {
+        addDetailImage(imgUrl);
+      }
+    }
+
     // ---- 4.8 鏈€鍚庡厹搴曪細濡傛灉浠嶇劧娌℃湁浠讳綍鍥剧墖锛屼粠鏁翠釜椤甸潰鐨?img 鏍囩鎻愬彇 ----
     if (productImages.length + detailImages.length < 2) {
       $('img').each((_i, el) => {
         if (productImages.length + detailImages.length >= MAX_TOTAL_IMAGES) return;
         const $img = $(el);
+        if (isLikelyUtilityContainer($, el)) return;
         const src = $img.attr('data-src') || $img.attr('data-lazy-src') || $img.attr('src') || '';
         const normalized = normalizeImageUrl(src, url);
         if (!normalized) return;
@@ -984,11 +1088,66 @@ async function scrapePage(url: string): Promise<ScrapePageResult> {
       .slice(0, MAX_DETAIL_IMAGES);
     const allImages = [...finalProductImages, ...finalDetailImages];
 
+    const finalTitle = productTitle || url;
+    const finalBodyText = (finalTextContent || '').trim();
+
+    if (isAccessDeniedText(finalTitle) || isAccessDeniedText(finalBodyText)) {
+      return {
+        statusCode: page.statusCode,
+        error: '页面访问受限或返回授权失败内容',
+        pageState: 'access-denied',
+        content: {
+          title: finalTitle,
+          textContent: finalBodyText || '页面访问受限',
+          productImages: finalProductImages,
+          detailImages: finalDetailImages,
+          images: allImages,
+          url,
+          statusCode: page.statusCode,
+        },
+      };
+    }
+
+    if (!finalBodyText && allImages.length === 0) {
+      return {
+        statusCode: page.statusCode,
+        error: '页面未提取到有效文字或图片',
+        pageState: 'empty',
+        content: {
+          title: finalTitle,
+          textContent: '',
+          productImages: finalProductImages,
+          detailImages: finalDetailImages,
+          images: allImages,
+          url,
+          statusCode: page.statusCode,
+        },
+      };
+    }
+
+    if (finalBodyText.replace(/\s+/g, '').length < 20 && allImages.length === 0) {
+      return {
+        statusCode: page.statusCode,
+        error: '页面内容过少，无法稳定判断',
+        pageState: 'insufficient-content',
+        content: {
+          title: finalTitle,
+          textContent: finalBodyText,
+          productImages: finalProductImages,
+          detailImages: finalDetailImages,
+          images: allImages,
+          url,
+          statusCode: page.statusCode,
+        },
+      };
+    }
+
     return {
       statusCode: page.statusCode,
+      pageState: 'ok',
       content: {
-        title: productTitle || url,
-        textContent: finalTextContent || '未能提取到有效文本内容',
+        title: finalTitle,
+        textContent: finalBodyText || '未能提取到有效文本内容',
         productImages: finalProductImages,
         detailImages: finalDetailImages,
         images: allImages,
@@ -1000,6 +1159,7 @@ async function scrapePage(url: string): Promise<ScrapePageResult> {
     return {
       statusCode: 0,
       error: error instanceof Error ? error.message : '网页抓取失败',
+      pageState: 'http-error',
     };
   }
 }
@@ -1023,6 +1183,8 @@ export async function POST(request: NextRequest) {
         success: false,
         error: scrapedResult.error || '网页抓取失败，请检查链接是否可访问',
         statusCode: scrapedResult.statusCode || undefined,
+        pageState: scrapedResult.pageState,
+        content: scrapedResult.content,
       });
     }
 

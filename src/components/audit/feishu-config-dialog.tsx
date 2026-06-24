@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -30,14 +30,12 @@ interface FeishuConfigDialogProps {
   onSave: (config: FeishuConfig) => void;
 }
 
-interface CreateResponse {
+interface AuthorizeResponse {
   success?: boolean;
   error?: string;
-  warning?: string;
   authMode?: 'tenant' | 'user';
   appToken?: string;
   tableId?: string;
-  tableName?: string;
   bitableUrl?: string;
   userAccessToken?: string;
   userRefreshToken?: string;
@@ -45,7 +43,6 @@ interface CreateResponse {
   userOpenId?: string;
   userName?: string;
   userGrantedScope?: string;
-  fields?: Array<{ name: string; type: number }>;
 }
 
 interface OAuthResultPayload {
@@ -76,209 +73,248 @@ function buildAuthorizeUrl(appId: string, state: string) {
   return authorizeUrl.toString();
 }
 
-export function FeishuConfigDialog({ config, onSave }: FeishuConfigDialogProps) {
-  const [open, setOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [authorizing, setAuthorizing] = useState(false);
-  const [createResult, setCreateResult] = useState<{
-    success: boolean;
-    message: string;
-    bitableUrl?: string;
-  } | null>(null);
-  const [formData, setFormData] = useState<FeishuConfig>({
+function normalizeConfig(config?: Partial<FeishuConfig> | null): FeishuConfig {
+  return {
     appId: '',
     appSecret: '',
     appToken: '',
     tableId: '',
     authMode: 'tenant',
-  });
+    ...config,
+  };
+}
+
+function buildOAuthPayloadKey(payload: OAuthResultPayload) {
+  return `${payload.state}::${payload.code || payload.error}`;
+}
+
+export function FeishuConfigDialog({ config, onSave }: FeishuConfigDialogProps) {
+  const [open, setOpen] = useState(false);
+  const [authorizing, setAuthorizing] = useState(false);
+  const [savingAppConfig, setSavingAppConfig] = useState(false);
+  const [resultMessage, setResultMessage] = useState<{
+    success: boolean;
+    message: string;
+    bitableUrl?: string;
+  } | null>(null);
+  const [formData, setFormData] = useState<FeishuConfig>(normalizeConfig(config));
 
   const redirectUri = useMemo(() => buildRedirectUri(), []);
-
-  const persistConfig = (nextConfig: FeishuConfig) => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextConfig));
-    } catch {
-      // ignore
-    }
-    onSave(nextConfig);
-  };
+  const formDataRef = useRef(formData);
+  const processedOAuthKeysRef = useRef<Set<string>>(new Set());
+  const processingOAuthKeyRef = useRef<string | null>(null);
+  const activeOAuthStateRef = useRef<string>('');
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (!saved) return;
+    formDataRef.current = formData;
+  }, [formData]);
 
-      const parsed = JSON.parse(saved) as FeishuConfig;
-      const normalized: FeishuConfig = {
-        authMode: 'tenant',
-        ...parsed,
-      };
-      setFormData(normalized);
-      onSave(normalized);
-    } catch {
-      // ignore
-    }
-  }, [onSave]);
-
-  const applyCreateResponse = (data: CreateResponse) => {
-    const nextConfig: FeishuConfig = {
-      ...formData,
-      authMode: data.authMode || 'tenant',
-      appToken: data.appToken || '',
-      tableId: data.tableId || '',
-      userAccessToken: data.userAccessToken,
-      userRefreshToken: data.userRefreshToken,
-      userTokenExpiresAt: data.userTokenExpiresAt,
-      userOpenId: data.userOpenId,
-      userName: data.userName,
-      userGrantedScope: data.userGrantedScope,
-    };
-
-    setFormData(nextConfig);
-    persistConfig(nextConfig);
-
-    const fieldList = (data.fields || []).map((field) => field.name).join('、');
-    const baseMessage = `已创建多维表格，含 ${data.fields?.length || 0} 个字段：${fieldList}`;
-    setCreateResult({
-      success: true,
-      message: data.warning ? `${baseMessage} ${data.warning}` : baseMessage,
-      bitableUrl: data.bitableUrl,
-    });
-  };
-
-  const createWithTenantMode = async () => {
-    if (!formData.appId || !formData.appSecret) {
-      setCreateResult({ success: false, message: '请先填写 App ID 和 App Secret。' });
-      return;
-    }
-
-    setCreating(true);
-    setCreateResult(null);
-
-    try {
-      const response = await fetch('/api/feishu/create-bitable', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          appId: formData.appId,
-          appSecret: formData.appSecret,
-          authMode: 'tenant',
-        }),
-      });
-
-      const data = (await response.json()) as CreateResponse;
-      if (!response.ok || data.error) {
-        setCreateResult({ success: false, message: data.error || '创建失败。' });
-        return;
-      }
-
-      applyCreateResponse(data);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '创建失败。';
-      setCreateResult({ success: false, message });
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  const consumeOAuthResult = async (payload: OAuthResultPayload) => {
-    const expectedState =
-      typeof window === 'undefined' ? '' : localStorage.getItem(OAUTH_STATE_KEY) || '';
-
-    if (!payload.state || payload.state !== expectedState) {
+  const persistConfig = useCallback(
+    (nextConfig: FeishuConfig) => {
       try {
-        localStorage.removeItem(OAUTH_RESULT_KEY);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextConfig));
       } catch {
         // ignore
       }
-      setAuthorizing(false);
-      setCreateResult({
-        success: false,
-        message: '飞书授权状态已失效，请重新点击“授权并创建多维表格”。',
-      });
-      return;
-    }
+      onSave(nextConfig);
+    },
+    [onSave]
+  );
 
+  const clearOAuthStorage = useCallback(() => {
     try {
       localStorage.removeItem(OAUTH_RESULT_KEY);
       localStorage.removeItem(OAUTH_STATE_KEY);
     } catch {
       // ignore
     }
+    activeOAuthStateRef.current = '';
+  }, []);
 
-    if (payload.error) {
-      setAuthorizing(false);
-      setCreateResult({
-        success: false,
-        message: payload.errorDescription || payload.error || '飞书授权失败。',
-      });
-      return;
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (!saved) return;
+      const parsed = normalizeConfig(JSON.parse(saved) as FeishuConfig);
+      setFormData(parsed);
+      onSave(parsed);
+    } catch {
+      // ignore
     }
+  }, [onSave]);
 
-    if (!payload.code) {
-      setAuthorizing(false);
-      setCreateResult({
-        success: false,
-        message: '飞书没有返回授权码，请重新授权。',
-      });
-      return;
-    }
-
-    setAuthorizing(true);
-    setCreateResult({
-      success: true,
-      message: '授权已完成，正在创建多维表格，请稍候…',
+  useEffect(() => {
+    if (!config) return;
+    setFormData((current) => {
+      const nextConfig = normalizeConfig(config);
+      if (JSON.stringify(current) === JSON.stringify(nextConfig)) {
+        return current;
+      }
+      return nextConfig;
     });
+  }, [config]);
+
+  const applyAuthorizeResponse = useCallback(
+    (data: AuthorizeResponse) => {
+      const currentConfig = formDataRef.current;
+      const nextConfig: FeishuConfig = {
+        ...currentConfig,
+        authMode: data.authMode || currentConfig.authMode || 'tenant',
+        appToken: data.appToken ?? currentConfig.appToken ?? '',
+        tableId: data.tableId ?? currentConfig.tableId ?? '',
+        bitableUrl: data.bitableUrl ?? currentConfig.bitableUrl,
+        userAccessToken: data.userAccessToken,
+        userRefreshToken: data.userRefreshToken,
+        userTokenExpiresAt: data.userTokenExpiresAt,
+        userOpenId: data.userOpenId,
+        userName: data.userName,
+        userGrantedScope: data.userGrantedScope,
+      };
+
+      setFormData(nextConfig);
+      persistConfig(nextConfig);
+
+      setResultMessage({
+        success: true,
+        message:
+          nextConfig.authMode === 'user'
+            ? '飞书用户授权已保存。业务创建好多维表格后，直接填写 App Token 和 Table ID 即可使用。'
+            : '应用配置已保存。',
+        bitableUrl: nextConfig.bitableUrl,
+      });
+    },
+    [persistConfig]
+  );
+
+  const saveAppConfigOnly = useCallback(async () => {
+    const currentConfig = formDataRef.current;
+    if (!currentConfig.appId || !currentConfig.appSecret) {
+      setResultMessage({ success: false, message: '请先填写 App ID 和 App Secret。' });
+      return;
+    }
+
+    setSavingAppConfig(true);
+    setResultMessage(null);
 
     try {
       const response = await fetch('/api/feishu/create-bitable', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          appId: formData.appId,
-          appSecret: formData.appSecret,
-          authMode: 'user',
-          code: payload.code,
-          redirectUri: buildRedirectUri(),
+          appId: currentConfig.appId,
+          appSecret: currentConfig.appSecret,
+          authMode: 'tenant',
+          appToken: currentConfig.appToken,
+          tableId: currentConfig.tableId,
+          bitableUrl: currentConfig.bitableUrl,
         }),
       });
 
-      const data = (await response.json()) as CreateResponse;
+      const data = (await response.json()) as AuthorizeResponse;
       if (!response.ok || data.error) {
-        setCreateResult({ success: false, message: data.error || '授权后创建失败。' });
+        setResultMessage({ success: false, message: data.error || '保存配置失败。' });
         return;
       }
 
-      applyCreateResponse(data);
+      applyAuthorizeResponse(data);
     } catch (error) {
-      const message = error instanceof Error ? error.message : '授权后创建失败。';
-      setCreateResult({ success: false, message });
+      const message = error instanceof Error ? error.message : '保存配置失败。';
+      setResultMessage({ success: false, message });
     } finally {
-      setAuthorizing(false);
+      setSavingAppConfig(false);
     }
-  };
+  }, [applyAuthorizeResponse]);
+
+  const consumeOAuthResult = useCallback(
+    async (payload: OAuthResultPayload) => {
+      const payloadKey = buildOAuthPayloadKey(payload);
+      if (!payload.state || (!payload.code && !payload.error)) return;
+
+      if (
+        processedOAuthKeysRef.current.has(payloadKey) ||
+        processingOAuthKeyRef.current === payloadKey
+      ) {
+        return;
+      }
+
+      const expectedState =
+        activeOAuthStateRef.current ||
+        (typeof window === 'undefined' ? '' : localStorage.getItem(OAUTH_STATE_KEY) || '');
+
+      if (!expectedState || payload.state !== expectedState) return;
+
+      processingOAuthKeyRef.current = payloadKey;
+      clearOAuthStorage();
+
+      if (payload.error) {
+        processedOAuthKeysRef.current.add(payloadKey);
+        processingOAuthKeyRef.current = null;
+        setAuthorizing(false);
+        setResultMessage({
+          success: false,
+          message: payload.errorDescription || payload.error || '飞书授权失败。',
+        });
+        return;
+      }
+
+      if (!payload.code) {
+        processedOAuthKeysRef.current.add(payloadKey);
+        processingOAuthKeyRef.current = null;
+        setAuthorizing(false);
+        setResultMessage({
+          success: false,
+          message: '飞书没有返回授权码，请重新授权。',
+        });
+        return;
+      }
+
+      setAuthorizing(true);
+      setResultMessage({
+        success: true,
+        message: '授权已完成，正在保存飞书授权信息，请稍候…',
+      });
+
+      try {
+        const currentConfig = formDataRef.current;
+        const response = await fetch('/api/feishu/create-bitable', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            appId: currentConfig.appId,
+            appSecret: currentConfig.appSecret,
+            authMode: 'user',
+            code: payload.code,
+            redirectUri: buildRedirectUri(),
+            appToken: currentConfig.appToken,
+            tableId: currentConfig.tableId,
+            bitableUrl: currentConfig.bitableUrl,
+          }),
+        });
+
+        const data = (await response.json()) as AuthorizeResponse;
+        if (!response.ok || data.error) {
+          setResultMessage({
+            success: false,
+            message: data.error || '授权成功，但保存授权信息失败，请重新授权。',
+          });
+          return;
+        }
+
+        applyAuthorizeResponse(data);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : '授权后保存飞书授权信息失败，请重试。';
+        setResultMessage({ success: false, message });
+      } finally {
+        processedOAuthKeysRef.current.add(payloadKey);
+        processingOAuthKeyRef.current = null;
+        setAuthorizing(false);
+      }
+    },
+    [applyAuthorizeResponse, clearOAuthStorage]
+  );
 
   useEffect(() => {
-    const consumeOAuthFromCurrentUrl = () => {
-      if (window.opener) return;
-
-      const currentUrl = new URL(window.location.href);
-      if (currentUrl.searchParams.get('feishu_oauth') !== '1') return;
-
-      const payload: OAuthResultPayload = {
-        type: 'feishu-oauth-result',
-        code: currentUrl.searchParams.get('code') || '',
-        state: currentUrl.searchParams.get('state') || '',
-        error: currentUrl.searchParams.get('error') || '',
-        errorDescription: currentUrl.searchParams.get('error_description') || '',
-      };
-
-      if (payload.code || payload.error) {
-        void consumeOAuthResult(payload);
-      }
-    };
-
     const handleMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin) return;
       const payload = event.data as OAuthResultPayload;
@@ -288,7 +324,6 @@ export function FeishuConfigDialog({ config, onSave }: FeishuConfigDialogProps) 
 
     const handleStorage = (event: StorageEvent) => {
       if (event.key !== OAUTH_RESULT_KEY || !event.newValue) return;
-
       try {
         const payload = JSON.parse(event.newValue) as OAuthResultPayload;
         if (payload?.type === 'feishu-oauth-result') {
@@ -301,14 +336,6 @@ export function FeishuConfigDialog({ config, onSave }: FeishuConfigDialogProps) 
 
     window.addEventListener('message', handleMessage);
     window.addEventListener('storage', handleStorage);
-    consumeOAuthFromCurrentUrl();
-
-    if (window.opener) {
-      return () => {
-        window.removeEventListener('message', handleMessage);
-        window.removeEventListener('storage', handleStorage);
-      };
-    }
 
     const existingResult = localStorage.getItem(OAUTH_RESULT_KEY);
     if (existingResult) {
@@ -326,7 +353,7 @@ export function FeishuConfigDialog({ config, onSave }: FeishuConfigDialogProps) 
       window.removeEventListener('message', handleMessage);
       window.removeEventListener('storage', handleStorage);
     };
-  }, [formData.appId, formData.appSecret]);
+  }, [consumeOAuthResult]);
 
   const handleSave = () => {
     persistConfig(formData);
@@ -340,42 +367,46 @@ export function FeishuConfigDialog({ config, onSave }: FeishuConfigDialogProps) 
           ...prev,
           [field]: value,
           authMode: 'tenant',
-          appToken: '',
-          tableId: '',
           userAccessToken: '',
           userRefreshToken: '',
           userTokenExpiresAt: undefined,
           userOpenId: '',
           userName: '',
+          userGrantedScope: '',
         };
       }
 
       return { ...prev, [field]: value };
     });
-    setCreateResult(null);
+    setResultMessage(null);
   };
 
-  const handleAuthorizeAndCreate = () => {
-    if (!formData.appId || !formData.appSecret) {
-      setCreateResult({ success: false, message: '请先填写 App ID 和 App Secret。' });
+  const handleAuthorize = () => {
+    const currentConfig = formDataRef.current;
+    if (!currentConfig.appId || !currentConfig.appSecret) {
+      setResultMessage({ success: false, message: '请先填写 App ID 和 App Secret。' });
       return;
     }
 
     const state = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const authorizeUrl = buildAuthorizeUrl(formData.appId, state);
+    const authorizeUrl = buildAuthorizeUrl(currentConfig.appId, state);
+
+    processedOAuthKeysRef.current.clear();
+    processingOAuthKeyRef.current = null;
+    activeOAuthStateRef.current = state;
 
     try {
       localStorage.removeItem(OAUTH_RESULT_KEY);
       localStorage.setItem(OAUTH_STATE_KEY, state);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(formData));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(currentConfig));
     } catch {
       // ignore
     }
 
     setAuthorizing(true);
-    setCreateResult({
+    setResultMessage({
       success: true,
-      message: '已拉起飞书授权，完成授权后窗口会自动关闭并回填结果。',
+      message: '已拉起飞书授权，完成后会自动保存授权信息。',
     });
 
     const popup = window.open(authorizeUrl, 'feishu-oauth', 'width=540,height=760');
@@ -388,11 +419,9 @@ export function FeishuConfigDialog({ config, onSave }: FeishuConfigDialogProps) 
   };
 
   const isConfigured = Boolean(
-    config?.appId && config?.appSecret && config?.appToken && config?.tableId
+    formData.appId && formData.appSecret && formData.appToken && formData.tableId
   );
-  const isUserAuthorized = Boolean(
-    formData.authMode === 'user' && formData.userRefreshToken
-  );
+  const isUserAuthorized = Boolean(formData.authMode === 'user' && formData.userRefreshToken);
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -416,7 +445,8 @@ export function FeishuConfigDialog({ config, onSave }: FeishuConfigDialogProps) 
         <DialogHeader>
           <DialogTitle className="text-slate-200">飞书多维表格配置</DialogTitle>
           <DialogDescription className="text-slate-500">
-            推荐使用飞书用户授权创建，谁授权谁就能直接访问，不会再落到“向应用申请权限”。
+            推荐先完成飞书用户授权。业务侧创建好多维表格后，再填写已有的 App Token 和
+            Table ID。
           </DialogDescription>
         </DialogHeader>
 
@@ -425,9 +455,6 @@ export function FeishuConfigDialog({ config, onSave }: FeishuConfigDialogProps) 
             <p>请先在飞书开放平台的应用安全设置里配置重定向地址：</p>
             <p className="mt-1 break-all text-blue-300">
               {redirectUri || '当前页面加载后会自动生成回调地址'}
-            </p>
-            <p className="mt-2 text-blue-300">
-              注意：这是 OAuth 重定向地址，不是事件订阅地址。
             </p>
           </div>
 
@@ -476,8 +503,8 @@ export function FeishuConfigDialog({ config, onSave }: FeishuConfigDialogProps) 
 
           <Button
             type="button"
-            onClick={handleAuthorizeAndCreate}
-            disabled={authorizing || creating || !formData.appId || !formData.appSecret}
+            onClick={handleAuthorize}
+            disabled={authorizing || savingAppConfig || !formData.appId || !formData.appSecret}
             className="w-full gap-2 bg-emerald-600 text-white hover:bg-emerald-700"
           >
             {authorizing ? (
@@ -485,44 +512,44 @@ export function FeishuConfigDialog({ config, onSave }: FeishuConfigDialogProps) 
             ) : (
               <Sparkles className="h-3.5 w-3.5" />
             )}
-            {authorizing ? '正在等待飞书授权…' : '授权并创建多维表格（推荐）'}
+            {authorizing ? '正在等待飞书授权…' : '仅授权飞书用户（推荐）'}
           </Button>
 
           <Button
             type="button"
             variant="outline"
             size="sm"
-            onClick={createWithTenantMode}
-            disabled={creating || authorizing || !formData.appId || !formData.appSecret}
+            onClick={saveAppConfigOnly}
+            disabled={savingAppConfig || authorizing || !formData.appId || !formData.appSecret}
             className="w-full gap-2 border-blue-500/30 text-blue-400 hover:bg-blue-500/10 hover:text-blue-300"
           >
-            {creating ? (
+            {savingAppConfig ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <ShieldCheck className="h-3.5 w-3.5" />
             )}
-            {creating ? '正在创建多维表格…' : '仍使用应用身份创建（可能需申请访问）'}
+            {savingAppConfig ? '正在保存配置…' : '仅保存应用配置'}
           </Button>
 
-          {createResult && (
+          {resultMessage && (
             <div
               className={`rounded-lg border p-3 text-xs ${
-                createResult.success
+                resultMessage.success
                   ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300'
                   : 'border-red-500/20 bg-red-500/5 text-red-300'
               }`}
             >
               <div className="flex items-start gap-2">
-                {createResult.success ? (
+                {resultMessage.success ? (
                   <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 ) : (
                   <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 )}
                 <div className="min-w-0">
-                  <p>{createResult.message}</p>
-                  {createResult.bitableUrl && (
+                  <p>{resultMessage.message}</p>
+                  {resultMessage.bitableUrl && (
                     <a
-                      href={createResult.bitableUrl}
+                      href={resultMessage.bitableUrl}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="mt-1 inline-flex items-center gap-1 text-blue-400 hover:text-blue-300"
@@ -537,7 +564,7 @@ export function FeishuConfigDialog({ config, onSave }: FeishuConfigDialogProps) 
 
           <div className="border-t border-slate-700 pt-4">
             <p className="mb-3 text-xs text-slate-500">
-              也可以手动填写已有的多维表格信息；授权并创建后这里会自动回填。
+              这里请填写业务侧已经创建好的多维表格信息；授权仅用于后续直接访问和写入。
             </p>
 
             <div className="space-y-2">

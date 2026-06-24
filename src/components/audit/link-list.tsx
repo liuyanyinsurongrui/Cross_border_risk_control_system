@@ -87,6 +87,11 @@ export function LinkList({ results, selectedIndex, onSelect }: LinkListProps) {
                     <p className="truncate font-mono text-xs text-slate-300">
                       {result.productLink.name || result.productLink.url}
                     </p>
+                    {result.screeningLabel && (
+                      <p className="mt-0.5 truncate text-[10px] text-amber-300">
+                        初筛：{result.screeningLabel}
+                      </p>
+                    )}
                     <p className="mt-0.5 truncate font-mono text-[11px] text-slate-500">
                       {result.productLink.url}
                     </p>
