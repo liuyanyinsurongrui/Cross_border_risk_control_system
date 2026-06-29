@@ -13,6 +13,53 @@ import { readFeishuConfig } from '@/lib/feishu-config-store';
 import { resolveFeishuConfig } from '@/lib/feishu-service';
 import type { AuditRules, BatchJobConfig, FeishuConfig, ModelApiConfig } from '@/lib/types';
 
+function mergeFeishuConfig(
+  requestFeishuConfig: FeishuConfig,
+  storedFeishuConfig: FeishuConfig | null
+): FeishuConfig {
+  const normalizedRequestConfig: FeishuConfig = {
+    ...requestFeishuConfig,
+    authMode: requestFeishuConfig.authMode === 'user' ? 'user' : 'tenant',
+  };
+
+  if (!storedFeishuConfig || storedFeishuConfig.appId !== requestFeishuConfig.appId) {
+    return normalizedRequestConfig;
+  }
+
+  if (normalizedRequestConfig.authMode !== 'user') {
+    return {
+      ...normalizedRequestConfig,
+      authMode: 'tenant',
+      userAccessToken: undefined,
+      userRefreshToken: undefined,
+      userTokenExpiresAt: undefined,
+      userOpenId: undefined,
+      userName: undefined,
+      userGrantedScope: undefined,
+      bitableUrl: normalizedRequestConfig.bitableUrl || storedFeishuConfig.bitableUrl || '',
+    };
+  }
+
+  const storedUserConfig =
+    storedFeishuConfig.authMode === 'user' ? storedFeishuConfig : null;
+
+  return {
+    ...normalizedRequestConfig,
+    authMode: 'user',
+    userAccessToken:
+      normalizedRequestConfig.userAccessToken || storedUserConfig?.userAccessToken,
+    userRefreshToken:
+      normalizedRequestConfig.userRefreshToken || storedUserConfig?.userRefreshToken,
+    userTokenExpiresAt:
+      normalizedRequestConfig.userTokenExpiresAt ?? storedUserConfig?.userTokenExpiresAt,
+    userOpenId: normalizedRequestConfig.userOpenId || storedUserConfig?.userOpenId,
+    userName: normalizedRequestConfig.userName || storedUserConfig?.userName,
+    userGrantedScope:
+      normalizedRequestConfig.userGrantedScope || storedUserConfig?.userGrantedScope,
+    bitableUrl: normalizedRequestConfig.bitableUrl || storedFeishuConfig.bitableUrl || '',
+  };
+}
+
 async function saveUploadedFile(file: File, jobId: string) {
   const jobsDir = path.dirname(getBatchJobConfigPath(jobId));
   await fs.mkdir(jobsDir, { recursive: true });
@@ -65,15 +112,10 @@ export async function POST(request: NextRequest) {
     }
 
     const storedFeishuConfig = await readFeishuConfig();
-    const mergedFeishuConfig: FeishuConfig =
-      storedFeishuConfig?.appId === requestFeishuConfig.appId
-        ? {
-            ...requestFeishuConfig,
-            ...storedFeishuConfig,
-            appId: requestFeishuConfig.appId,
-            appSecret: requestFeishuConfig.appSecret,
-          }
-        : requestFeishuConfig;
+    const mergedFeishuConfig = mergeFeishuConfig(
+      requestFeishuConfig,
+      storedFeishuConfig
+    );
 
     const normalizedFeishuConfig =
       mergedFeishuConfig.authMode === 'user'

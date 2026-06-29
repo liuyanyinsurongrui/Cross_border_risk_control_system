@@ -654,6 +654,7 @@ export default function AuditPage() {
                 onLinksAdded={handleLinksAdded}
                 isLoading={isUploading}
                 setIsLoading={setIsUploading}
+                existingUrls={results.map((item) => item.productLink.url)}
               />
               <LinkList results={results} selectedIndex={selectedIndex} onSelect={setSelectedIndex} />
               <RulesConfig rules={rules} modelOptions={modelOptions} onChange={setRules} />

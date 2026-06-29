@@ -191,7 +191,9 @@ function getFeishuErrorMessage(
 
   if (
     core.toLowerCase().includes('refresh token has been revoked') ||
-    code === 20064
+    core.toLowerCase().includes('refresh token has expired') ||
+    code === 20064 ||
+    code === 20037
   ) {
     return '飞书用户授权已失效，请重新点击“仅授权飞书用户”完成授权后再试';
   }
