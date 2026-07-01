@@ -9,7 +9,7 @@ import {
   getAdultConclusionStatus,
 } from '@/lib/adult-audit';
 import { createFeishuRecordWriter } from '@/lib/feishu-service';
-import { runAudit, screenAuditRulesByProductName } from '@/lib/audit-service';
+import { runAudit, screenAuditRulesByIntent } from '@/lib/audit-service';
 import { readBatchJobConfig, readBatchJobState, writeBatchJobState } from '@/lib/batch-job';
 import type { AuditResult, BatchJobState, ProductLink, ScrapedContent } from '@/lib/types';
 
@@ -40,18 +40,6 @@ function findHeaderByAliases(headers: string[], aliases: readonly string[]) {
       return aliases.some((alias) => normalizedHeader === alias.toLowerCase().trim());
     }) || null
   );
-}
-
-function isProductNameEligible(name: string) {
-  const normalized = name.trim();
-  if (!normalized) return false;
-  if (normalized.length < 2) return false;
-
-  const blacklist = ['test', '测试', 'sample', 'demo', 'null', 'n/a', '未知', '未命名', '商品', '产品'];
-  const lower = normalized.toLowerCase();
-  if (blacklist.some((item) => lower === item || lower.includes(item))) return false;
-
-  return /[\u4e00-\u9fa5a-zA-Z0-9]{2,}/.test(normalized);
 }
 
 function updateState(state: BatchJobState, patch: Partial<BatchJobState>): BatchJobState {
@@ -316,7 +304,7 @@ export async function runBatchJob(jobId: string) {
 
     state = updateState(state, {
       step: 'intent-matching',
-      message: '正在做商品名基础清洗，规则级筛选将在正式审核前执行...',
+      message: '正在准备规则意图识别，抓取完成后会先判断命中规则再执行内容审核...',
       progress: {
         ...state.progress,
         deduplicatedRows: deduplicatedLinks.length,
@@ -324,18 +312,9 @@ export async function runBatchJob(jobId: string) {
     });
     await writeBatchJobState(state);
 
-    const eligibleLinks: ProductLink[] = [];
+    const eligibleLinks = deduplicatedLinks;
     const skippedLinks: ProductLink[] = [];
-    const shouldFilterByProductName = Boolean(detectedColumns.name);
-    let skippedRows = 0;
-    for (const link of deduplicatedLinks) {
-      if (shouldFilterByProductName && !isProductNameEligible(link.name || '')) {
-        skippedRows += 1;
-        skippedLinks.push(link);
-        continue;
-      }
-      eligibleLinks.push(link);
-    }
+    const skippedRows = 0;
 
     state = updateState(state, {
       step: 'preparing-feishu',
@@ -365,9 +344,7 @@ export async function runBatchJob(jobId: string) {
           const skippedResult = createBatchAuditResult(link, {
             conclusion: '非审核目标',
             status: 'unaudited',
-            analysis: shouldFilterByProductName
-              ? `产品名称“${link.name || '空值'}”不符合当前审核目标的意图识别规则，已跳过审核。`
-              : '当前记录不属于审核目标，已跳过审核。',
+            analysis: '当前记录不属于审核目标，已跳过审核。',
           });
 
           try {
@@ -432,8 +409,8 @@ export async function runBatchJob(jobId: string) {
               throw new Error('网页抓取结果为空');
             }
 
-            const preScreening = await screenAuditRulesByProductName(
-              link.name || scrapedContent.productName || scrapedContent.title || '',
+            const preScreening = await screenAuditRulesByIntent(
+              scrapedContent,
               config.rules,
               config.modelConfig
             );
@@ -442,18 +419,9 @@ export async function runBatchJob(jobId: string) {
               const result = createBatchAuditResult(link, {
                 conclusion: '未审核',
                 status: 'unaudited',
-                analysis: `规则级商品名筛选未命中任何已启用规则，本条链接已跳过页面审核。\n\n${preScreening.analysis}`,
+                analysis: `规则意图识别未命中任何已启用规则，本条链接已跳过内容审核。\n\n${preScreening.analysis}`,
                 scrapedContent,
-                ruleResults: [
-                  {
-                    ruleId: 'rule-name-screening',
-                    ruleName: '规则级商品名筛选',
-                    model: 'system',
-                    conclusion: '未命中',
-                    violations: [],
-                    analysis: preScreening.analysis,
-                  },
-                ],
+                ruleResults: preScreening.ruleResults,
               });
               result.screeningLabel = '未命中规则';
               result.adultConclusion = '未审核';

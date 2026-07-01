@@ -77,7 +77,7 @@ const LEGACY_FIELD_ALIASES = {
   真实SKU编号: ['真实SPU'],
   落地页文字: ['落地页文字内容'],
   落地页图片: ['落地页图片内容'],
-  审核标签: ['产品名称意图识别'],
+  审核标签: ['产品名称意图识别', '规则意图识别'],
   产品判断依据: [
     '产品判定依据',
     '产品审核思考过程',
@@ -854,6 +854,7 @@ function buildBitableRecordFields(
     落地页文字内容: result.scrapedContent?.textContent?.slice(0, 5000) || '',
     落地页图片内容: imageAttachments,
     产品名称意图识别: matchedRuleText,
+    规则意图识别: matchedRuleText,
     产品判定依据: productAnalysis,
     产品审核思考过程: productAnalysis,
     宣传审核结果:

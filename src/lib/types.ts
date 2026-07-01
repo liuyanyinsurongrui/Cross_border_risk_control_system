@@ -50,6 +50,7 @@ export interface RuleAuditResult {
   conclusion: string;
   violations: ViolationItem[];
   analysis: string;
+  stage?: 'intent' | 'audit' | 'system';
 }
 
 export interface AuditResult {

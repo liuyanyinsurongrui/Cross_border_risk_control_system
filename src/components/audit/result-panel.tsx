@@ -176,7 +176,7 @@ export function ResultPanel({ result }: ResultPanelProps) {
               <p className="mt-0.5 text-xs text-slate-300">成人审核结论：{result.adultConclusion}</p>
             )}
             {result.screeningLabel && (
-              <p className="mt-0.5 text-xs text-amber-300">商品名初筛：{result.screeningLabel}</p>
+              <p className="mt-0.5 text-xs text-amber-300">规则意图识别：{result.screeningLabel}</p>
             )}
             {result.matchedRuleNames && result.matchedRuleNames.length > 0 && (
               <p className="mt-0.5 text-xs text-cyan-300">
@@ -224,11 +224,14 @@ export function ResultPanel({ result }: ResultPanelProps) {
 function RuleResultSection({ ruleResults }: { ruleResults: RuleAuditResult[] }) {
   const [expandedRules, setExpandedRules] = useState<Set<string>>(new Set());
 
-  const toggleRule = (ruleId: string) => {
+  const getRuleKey = (ruleResult: RuleAuditResult) =>
+    `${ruleResult.ruleId}:${ruleResult.stage || 'audit'}:${ruleResult.ruleName}`;
+
+  const toggleRule = (ruleKey: string) => {
     setExpandedRules((prev) => {
       const next = new Set(prev);
-      if (next.has(ruleId)) next.delete(ruleId);
-      else next.add(ruleId);
+      if (next.has(ruleKey)) next.delete(ruleKey);
+      else next.add(ruleKey);
       return next;
     });
   };
@@ -238,7 +241,8 @@ function RuleResultSection({ ruleResults }: { ruleResults: RuleAuditResult[] }) 
       <h3 className="mb-2 text-xs font-medium text-slate-400">各规则审核详情</h3>
       <div className="space-y-1.5">
         {ruleResults.map((ruleResult) => {
-          const isExpanded = expandedRules.has(ruleResult.ruleId);
+          const ruleKey = getRuleKey(ruleResult);
+          const isExpanded = expandedRules.has(ruleKey);
           const conclusionStyle =
             ruleResult.conclusion === '合规'
               ? 'text-[#10b981]'
@@ -247,9 +251,9 @@ function RuleResultSection({ ruleResults }: { ruleResults: RuleAuditResult[] }) 
                 : 'text-[#eab308]';
 
           return (
-            <div key={ruleResult.ruleId} className="rounded-md border border-[#2a2d3a] bg-[#14161e]">
+            <div key={ruleKey} className="rounded-md border border-[#2a2d3a] bg-[#14161e]">
               <button
-                onClick={() => toggleRule(ruleResult.ruleId)}
+                onClick={() => toggleRule(ruleKey)}
                 className="flex w-full items-center gap-2 p-2.5 text-left"
               >
                 {ruleResult.conclusion === '合规' ? (
@@ -259,7 +263,10 @@ function RuleResultSection({ ruleResults }: { ruleResults: RuleAuditResult[] }) 
                 ) : (
                   <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 text-[#eab308]" />
                 )}
-                <span className="flex-1 text-xs text-[#e2e8f0]">{ruleResult.ruleName}</span>
+                <span className="flex-1 text-xs text-[#e2e8f0]">
+                  {ruleResult.ruleName}
+                  {ruleResult.stage === 'intent' ? ' · 意图识别' : ''}
+                </span>
                 <span className={`text-[10px] font-medium ${conclusionStyle}`}>{ruleResult.conclusion}</span>
                 <span className="flex items-center gap-0.5 rounded bg-[#1e2030] px-1 py-0.5 text-[10px] text-[#64748b]">
                   <Cpu className="h-2.5 w-2.5" />

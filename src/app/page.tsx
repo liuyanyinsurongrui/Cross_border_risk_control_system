@@ -27,6 +27,24 @@ import type {
 
 const RULES_STORAGE_KEY = 'audit_rules_config';
 
+function mergeRulesWithDefaults(rules: AuditRules): AuditRules {
+  const defaultRuleMap = new Map(DEFAULT_AUDIT_RULES.map((rule) => [rule.id, rule]));
+
+  return {
+    rules: rules.rules.map((rule) => {
+      const defaultRule = defaultRuleMap.get(rule.id);
+      if (!defaultRule) return { ...rule };
+
+      return {
+        ...defaultRule,
+        ...rule,
+        screeningPrompt: rule.screeningPrompt?.trim() ? rule.screeningPrompt : defaultRule.screeningPrompt,
+        prompt: rule.prompt?.trim() ? rule.prompt : defaultRule.prompt,
+      };
+    }),
+  };
+}
+
 function createLimiter(concurrency: number) {
   const safeConcurrency = Math.max(1, concurrency);
   let activeCount = 0;
@@ -98,9 +116,11 @@ export default function AuditPage() {
 
       const parsed = JSON.parse(saved) as AuditRules;
       if (Array.isArray(parsed?.rules) && parsed.rules.length > 0) {
-        setRules({
-          rules: parsed.rules.map((rule) => ({ ...rule })),
-        });
+        setRules(
+          mergeRulesWithDefaults({
+            rules: parsed.rules.map((rule) => ({ ...rule })),
+          })
+        );
       }
     } catch {
       // ignore invalid saved rules

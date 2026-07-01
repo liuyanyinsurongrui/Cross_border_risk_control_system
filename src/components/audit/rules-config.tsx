@@ -35,44 +35,94 @@ import {
 import { Card, CardContent } from '@/components/ui/card';
 import type { AuditRules, AuditRule, ModelOption } from '@/lib/types';
 
+const PROHIBITED_SCREENING_PROMPT = `你是一名跨境商品禁售类目意图识别助手。请先判断以下商品是否值得进入“禁售商品”审核，而不是直接下最终违规结论。
+
+请重点识别这些高风险意图：
+1. 武器、弹药、刀具、攻击器械及其关键配件
+2. 烟花爆竹、火药、引火物、爆炸物相关商品
+3. 药品、处方药、医疗器械、注射类产品、宣称治疗或药用功效的商品
+4. 活体动植物、种子、菌种、土壤、标本、野生动物制品
+5. 危险化学品、易燃易爆品、腐蚀性、有毒或放射性物质
+6. 监听偷拍设备、破解设备、规避监管或违法用途工具
+7. 明显属于海关、物流或当地法规限制运输或销售的禁限售品
+
+请基于以下信息判断是否需要进入“禁售商品”内容审核：
+商品名称：{product_name}
+页面标题：{page_title}
+页面链接：{page_url}
+页面文字：
+{text_content}
+
+判断原则：
+- 如果商品从名称、标题、描述上看，明显或较大概率属于上述禁售、限售或高风险范围，请只输出“命中”。
+- 如果只是普通商品，且没有明显指向禁售类目的语义，请只输出“不命中”。
+- 如果存在边界情况，但从文字上已经值得进一步复核，也输出“命中”。
+
+只输出“命中”或“不命中”，不要补充解释。`;
+
+const PROHIBITED_AUDIT_PROMPT = `你是一名跨境电商禁售商品审核专家。请严格判断该商品是否属于禁售、限售或高风险商品，并输出标准 JSON 结果。
+
+审核重点：
+1. 是否为武器、刀具、枪支弹药、攻击器械或其关键配件
+2. 是否为烟花爆竹、火药、引火类、爆炸物相关商品
+3. 是否为药品、处方药、医疗器械、注射类、宣称治疗功效的特殊用品
+4. 是否为活体植物、活体动物、繁殖材料、种子、菌种、受保护动植物制品
+5. 是否为危险化学品、易燃易爆品、腐蚀性、毒性或放射性物质
+6. 是否为监听偷拍、破解、规避监管、违法使用工具
+7. 是否存在明显违反海关运输、跨境销售或当地法规限制的情形
+
+输出要求：
+- 只有在证据明确时判定“违规”。
+- 不明确但高度可疑时判定“待人工复核”。
+- 普通商品且无相关风险证据时判定“合规”。
+- 必须给出具体证据，证据优先引用页面文字、标题、规格、用途描述和图片信息。`;
+
 export const DEFAULT_AUDIT_RULES: AuditRule[] = [
   {
     id: 'rule-false-ad',
     name: '虚假宣传',
+    screeningPrompt:
+      '请判断以下商品信息是否需要进入“虚假宣传”审核。若商品页面可能涉及夸大功效、虚构认证、绝对化宣传、虚假折扣或其他宣传合规风险，请只输出“命中”；否则只输出“不命中”。\n\n商品名称：{product_name}\n页面标题：{page_title}\n页面文字：\n{text_content}',
     prompt:
-      '检查产品页面是否存在虚假宣传，包括但不限于：夸大产品功效、伪造检测认证、虚构用户评价/销量数据、使用绝对化用语（如"最好""第一""100%有效"）、虚假限时优惠（如倒计时永远不会结束的促销）、虚构原价制造折扣假象。',
+      '请审核该商品页面是否存在虚假宣传或误导性营销，包括但不限于：夸大产品功效、伪造检测认证、虚构用户评价或销量、使用绝对化用语、制造虚假限时优惠、虚构原价折扣等。请严格输出标准 JSON 结果，并给出明确证据。',
     enabled: true,
     model: '',
   },
   {
     id: 'rule-ip',
     name: '知识产权侵权',
+    screeningPrompt:
+      '请判断以下商品信息是否需要进入“知识产权侵权”审核。若商品可能涉及品牌侵权、商标或 Logo 使用不当、外观仿冒、文案盗用、包装混淆等风险，请只输出“命中”；否则只输出“不命中”。\n\n商品名称：{product_name}\n页面标题：{page_title}\n页面文字：\n{text_content}',
     prompt:
-      '检查产品页面是否存在知识产权侵权风险，包括但不限于：未经授权使用知名品牌商标/Logo/名称、山寨仿冒知名产品外观设计、盗用他人图片或文案、使用相似包装/品牌名混淆消费者。',
+      '请审核该商品页面是否存在知识产权侵权风险，包括但不限于：未经授权使用品牌名称、商标、Logo，仿冒知名商品外观，盗用图片文案，或使用易引发消费者混淆的包装与命名。请严格输出标准 JSON 结果，并给出明确证据。',
     enabled: true,
     model: '',
   },
   {
     id: 'rule-prohibited',
-    name: '违禁品',
-    prompt:
-      '检查产品是否属于跨境销售违禁品类，包括但不限于：危险武器及配件、违禁药品及医疗器械、受保护动植物制品、危险化学品、侵权盗版商品、各国法规明确禁止跨境销售的品类。',
+    name: '禁售商品',
+    screeningPrompt: PROHIBITED_SCREENING_PROMPT,
+    prompt: PROHIBITED_AUDIT_PROMPT,
     enabled: true,
     model: '',
   },
   {
     id: 'rule-price-fraud',
     name: '价格欺诈',
+    screeningPrompt:
+      '请判断以下商品信息是否需要进入“价格欺诈”审核。若商品页面可能涉及价格误导、虚假折扣、隐藏费用、比较价不实等问题，请只输出“命中”；否则只输出“不命中”。\n\n商品名称：{product_name}\n页面标题：{page_title}\n页面文字：\n{text_content}',
     prompt:
-      '检查产品页面是否存在价格欺诈行为，包括但不限于：虚构原价制造大额折扣假象、隐藏附加费用（运费/税费/订阅费未明示）、价格误导（标价单位不清、捆绑销售未说明）、虚假比较价格（与其他平台价格对比不实）。',
+      '请审核该商品页面是否存在价格欺诈或价格误导行为，包括但不限于：虚构原价、夸大折扣、隐藏运费税费、标价单位不清、捆绑销售未说明、虚假对比价等。请严格输出标准 JSON 结果，并给出明确证据。',
     enabled: true,
     model: '',
   },
   {
     id: 'rule-misleading-img',
     name: '误导性图片',
+    screeningPrompt:
+      '请判断以下商品信息是否需要进入“误导性图片”审核。若商品页面可能存在图文不符、效果图误导、附赠品未说明、过度修图等风险，请只输出“命中”；否则只输出“不命中”。\n\n商品名称：{product_name}\n页面标题：{page_title}\n页面文字：\n{text_content}',
     prompt:
-      '检查产品图片是否存在误导消费者的情况，包括但不限于：产品图片与实际商品严重不符（颜色/尺寸/材质差异大）、使用效果图但未标注"仅供参考"、图片中包含未包含在售价内的配件/赠品、过度PS美化掩盖产品缺陷。',
+      '请审核该商品页面的图片是否存在误导消费者的情况，包括但不限于：商品图与实物严重不符、使用效果图但未说明、图片展示了不包含在售价内的配件或赠品、过度修图掩盖缺陷等。请严格输出标准 JSON 结果，并给出明确证据。',
     enabled: true,
     model: '',
   },
@@ -108,14 +158,15 @@ export function RulesConfig({ rules, modelOptions, onChange }: RulesConfigProps)
           </CardContent>
         </Card>
       </DialogTrigger>
-      <DialogContent className="flex max-h-[85vh] max-w-[560px] flex-col overflow-hidden border-[#2a2d3a] bg-[#1a1d27] text-[#e2e8f0]">
+      <DialogContent className="flex max-h-[85vh] max-w-[620px] flex-col overflow-hidden border-[#2a2d3a] bg-[#1a1d27] text-[#e2e8f0]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-[#e2e8f0]">
             <Shield className="h-5 w-5 text-[#10b981]" />
             审核规则配置
           </DialogTitle>
           <DialogDescription className="text-[#94a3b8]">
-            每条规则的提示词是 AI 审核的核心指令，规则名称仅用于展示。模型选项跟随顶部模型配置自动变化。
+            每条规则支持单独维护“意图识别提示词”和“内容审核提示词”。
+            命中意图识别后，系统才会继续执行该规则的内容审核。
           </DialogDescription>
         </DialogHeader>
         <RulesEditor
@@ -142,11 +193,13 @@ function RulesEditor({
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
+  const [editScreeningPrompt, setEditScreeningPrompt] = useState('');
   const [editPrompt, setEditPrompt] = useState('');
   const [editModel, setEditModel] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [addingNew, setAddingNew] = useState(false);
   const [newName, setNewName] = useState('');
+  const [newScreeningPrompt, setNewScreeningPrompt] = useState('');
   const [newPrompt, setNewPrompt] = useState('');
   const [newModel, setNewModel] = useState(modelOptions[0]?.id ?? '');
 
@@ -186,6 +239,7 @@ function RulesEditor({
   const startEdit = (rule: AuditRule) => {
     setEditingId(rule.id);
     setEditName(rule.name);
+    setEditScreeningPrompt(rule.screeningPrompt || '');
     setEditPrompt(rule.prompt);
     setEditModel(modelMap.has(rule.model) ? rule.model : firstModelId);
   };
@@ -193,6 +247,7 @@ function RulesEditor({
   const cancelEdit = () => {
     setEditingId(null);
     setEditName('');
+    setEditScreeningPrompt('');
     setEditPrompt('');
     setEditModel('');
   };
@@ -206,6 +261,7 @@ function RulesEditor({
           ? {
               ...rule,
               name: editName.trim(),
+              screeningPrompt: editScreeningPrompt.trim() || undefined,
               prompt: editPrompt.trim(),
               model: hasModelOptions ? editModel : '',
             }
@@ -220,12 +276,14 @@ function RulesEditor({
     const newRule: AuditRule = {
       id: `rule-custom-${Date.now()}`,
       name: newName.trim(),
+      screeningPrompt: newScreeningPrompt.trim() || undefined,
       prompt: newPrompt.trim(),
       enabled: true,
       model: hasModelOptions ? newModel : '',
     };
     onChange({ ...rules, rules: [...rules.rules, newRule] });
     setNewName('');
+    setNewScreeningPrompt('');
     setNewPrompt('');
     setNewModel(firstModelId);
     setAddingNew(false);
@@ -233,12 +291,11 @@ function RulesEditor({
 
   const cancelAdd = () => {
     setNewName('');
+    setNewScreeningPrompt('');
     setNewPrompt('');
     setNewModel(firstModelId);
     setAddingNew(false);
   };
-
-  const getModelLabel = (modelId: string) => modelMap.get(modelId)?.name || modelId || '未配置';
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -263,7 +320,7 @@ function RulesEditor({
 
       {!hasModelOptions && (
         <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
-          当前未配置可用模型，请先在右上角完成模型配置，规则模型将保持为空。
+          当前还没有可用模型，请先在右上角完成模型配置。
         </div>
       )}
 
@@ -274,19 +331,23 @@ function RulesEditor({
             <Input
               value={newName}
               onChange={(event) => setNewName(event.target.value)}
-              placeholder="如：虚假宣传检测"
+              placeholder="如：禁售商品审核"
               className="h-8 border-[#2a2d3a] bg-[#0f1117] text-xs text-[#e2e8f0] placeholder:text-[#4a5568]"
             />
           </div>
-          <div className="space-y-1.5">
-            <label className="text-[11px] text-[#94a3b8]">审核提示词</label>
-            <Textarea
-              value={newPrompt}
-              onChange={(event) => setNewPrompt(event.target.value)}
-              placeholder="AI 将严格按照此提示词审核产品内容"
-              className="min-h-[80px] resize-none border-[#2a2d3a] bg-[#0f1117] text-xs text-[#e2e8f0] placeholder:text-[#4a5568]"
-            />
-          </div>
+          <PromptField
+            label="意图识别提示词"
+            value={newScreeningPrompt}
+            onChange={setNewScreeningPrompt}
+            placeholder="可选。命中后才会继续执行内容审核。支持 {product_name}、{page_title}、{page_url}、{text_content} 占位符。"
+            description="留空时默认直接进入内容审核，避免影响已有规则。"
+          />
+          <PromptField
+            label="内容审核提示词"
+            value={newPrompt}
+            onChange={setNewPrompt}
+            placeholder="AI 将严格按照此提示词审核页面内容"
+          />
           <ModelSelector
             model={newModel}
             options={modelOptions}
@@ -334,14 +395,19 @@ function RulesEditor({
                     className="h-8 border-[#2a2d3a] bg-[#0f1117] text-xs text-[#e2e8f0]"
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <label className="text-[11px] text-[#94a3b8]">审核提示词</label>
-                  <Textarea
-                    value={editPrompt}
-                    onChange={(event) => setEditPrompt(event.target.value)}
-                    className="min-h-[80px] resize-none border-[#2a2d3a] bg-[#0f1117] text-xs text-[#e2e8f0]"
-                  />
-                </div>
+                <PromptField
+                  label="意图识别提示词"
+                  value={editScreeningPrompt}
+                  onChange={setEditScreeningPrompt}
+                  placeholder="可选。命中后才会继续执行内容审核。"
+                  description="支持 {product_name}、{page_title}、{page_url}、{text_content} 占位符。"
+                />
+                <PromptField
+                  label="内容审核提示词"
+                  value={editPrompt}
+                  onChange={setEditPrompt}
+                  placeholder="AI 将严格按照此提示词审核页面内容"
+                />
                 <ModelSelector
                   model={editModel}
                   options={modelOptions}
@@ -402,14 +468,11 @@ function RulesEditor({
 
                 {expandedId === rule.id && (
                   <div className="mt-3 space-y-3">
-                    <div className="rounded-md border border-[#1e2030] bg-[#0f1117] p-3">
-                      <p className="mb-1.5 text-[10px] uppercase tracking-wider text-[#4a5568]">
-                        提示词（AI 审核指令）
-                      </p>
-                      <p className="whitespace-pre-wrap text-xs leading-relaxed text-[#94a3b8]">
-                        {rule.prompt}
-                      </p>
-                    </div>
+                    <PromptPreview
+                      title="意图识别提示词"
+                      content={rule.screeningPrompt?.trim() || '未配置，当前会默认直接进入内容审核。'}
+                    />
+                    <PromptPreview title="内容审核提示词" content={rule.prompt} />
 
                     <div className="flex items-center gap-2">
                       <Cpu className="h-3.5 w-3.5 text-[#64748b]" />
@@ -434,9 +497,7 @@ function RulesEditor({
                           ))}
                         </SelectContent>
                       </Select>
-                      {!rule.model && (
-                        <span className="text-[11px] text-amber-300">未配置</span>
-                      )}
+                      {!rule.model && <span className="text-[11px] text-amber-300">未配置</span>}
                     </div>
 
                     <div className="flex gap-2 pt-1">
@@ -478,6 +539,42 @@ function RulesEditor({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function PromptField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  description,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  description?: string;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <label className="text-[11px] text-[#94a3b8]">{label}</label>
+      <Textarea
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="min-h-[88px] resize-none border-[#2a2d3a] bg-[#0f1117] text-xs text-[#e2e8f0] placeholder:text-[#4a5568]"
+      />
+      {description ? <p className="text-[10px] text-[#64748b]">{description}</p> : null}
+    </div>
+  );
+}
+
+function PromptPreview({ title, content }: { title: string; content: string }) {
+  return (
+    <div className="rounded-md border border-[#1e2030] bg-[#0f1117] p-3">
+      <p className="mb-1.5 text-[10px] uppercase tracking-wider text-[#4a5568]">{title}</p>
+      <p className="whitespace-pre-wrap text-xs leading-relaxed text-[#94a3b8]">{content}</p>
     </div>
   );
 }
